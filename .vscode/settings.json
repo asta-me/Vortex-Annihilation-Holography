@@ -1,0 +1,8 @@
+{
+  "python.defaultInterpreterPath": "C:/Users/astam/anaconda3/envs/vortex/python.exe",
+  "python.terminal.activateEnvironment": true,
+  "jupyter.jupyterServerType": "local",
+  "python.analysis.extraPaths": [
+    "./1_Alternative_projection"
+  ]
+}
