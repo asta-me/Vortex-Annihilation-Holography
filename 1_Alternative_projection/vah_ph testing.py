@@ -5,48 +5,64 @@ Python translation of AlternativeProjection_VAH_PH.m
 - GPU-first (CuPy), fallback NumPy
 - Uses function_vortex_detection_accegpu.py and function_vortex_elimination_accegpu.py
 """
+
+#%% ---------- Imports ----------
 import time
 import numpy as np
 import matplotlib.pyplot as plt
-import scipy.io
 import cupy as cp
 from function_vortex_detection_accegpu import function_vortex_detection_accegpu
 from function_vortex_elimination_accegpu import function_vortex_elimination_accegpu
 from skimage.transform import resize
 
-# --- Parameters ---
+#%% ---------- System parameters ----------
+lamda = 532e-6                          # [mm] Wavelength in mm
+k = 2 * np.pi / lamda                   # [1/mm] Wavenumber
+dh = 0.00374                            # [mm] Pixel pitch
+
+#%% ---------- Import target ----------
+
+# --- To start from a tiff file
+# from skimage.io import imread
+# input_image_path = "Cat_black.tif"
+# F1 = imread(input_image_path)
+# --- To start from a .mat file
+import scipy.io
 mat = scipy.io.loadmat("object_grayscale.mat")
 F1 = mat["F1"]
 
-# --- Elaborating the upload
-F1 = np.array(F1, dtype=np.float32)
-n, m = F1.shape
-F1 = resize(F1, (512, 512), order=1, preserve_range=True, anti_aliasing=True)
-n, m = F1.shape
-E = np.sum(F1)
-El = 0.5 * E
-lamda = 532e-6
-k = 2 * np.pi / lamda
-dh = 0.00374
-F = np.abs(np.sqrt(F1))
-F = np.pad(F, ((n//4, n//4), (m//4, m//4)), mode="constant")
-nn, mm = F.shape
+
+F1 = np.array(F1, dtype=np.float32)     # Convert to float32 
+n, m = F1.shape                         # Original dimensions    
+F1 = resize(F1, (512, 512), order=1, preserve_range=True, anti_aliasing=True) # Resize to 512x512
+n, m = F1.shape                         # Dimensions after resizing  
+E = np.sum(F1)                          # Energy of the target image
+El = 0.5 * E                            # Energy for the "outer" region in the VAH algorithm
+                                        # I guess 0.5 could be a parameter to make this MRAF-like
+
+
+F = np.abs(np.sqrt(F1))                                             # Amplitude of the target field (sqrt of intensity) (abs(?))
+F = np.pad(F, ((n//4, n//4), (m//4, m//4)), mode="constant")        # Pad to 1024x1024 with zeros (constant padding)
+nn, mm = F.shape                                                    # Dimensions after padding (should be 1024x1024)
 
 # --- Initial phase and amplitude ---
-phi = cp.exp(1j * 2 * cp.pi * cp.random.rand(nn, mm))
+phi = cp.exp(1j * 2 * cp.pi * cp.random.rand(nn, mm))               # Random initial phase (complex exponential of random values in [0,1))
 amp = cp.random.rand(nn, mm)
 
 # --- Band-limitation masks ---
-bandlim_spe = cp.zeros((nn, mm), dtype=cp.float32)
+bandlim_spe = cp.zeros((nn, mm), dtype=cp.float32)  # Limits on the SLM aperture
 bandlim_spe[nn//4:3*nn//4, mm//4:3*mm//4] = 1.0
-bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)
+
+bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)   
 bandlim_in[nn//4:3*nn//4, mm//4:3*mm//4] = 1.0
+bandlim_in[nn//3:2*nn//3, mm//3:2*mm//3] = 1.0 # Inner region of the target image
 bandlim_ou = 1.0 - bandlim_in
+
 # Incident Gaussian
-w = 0.26
+w = 0.26                            # [mm] Beam waist of the incident Gaussian
 ox, oy = cp.meshgrid(cp.linspace(-dh*mm/2, dh*mm/2, mm), cp.linspace(-dh*nn/2, dh*nn/2, nn))
 Gaussian = cp.exp(-((ox**2)+(oy**2))/w)
-incident = bandlim_spe * Gaussian
+incident = bandlim_spe * Gaussian   # Incident field on the SLM, limited by the SLM aperture
 
 # --- Iterative alternative projection with VAH ---
 loop = 200
@@ -98,6 +114,7 @@ for i in range(1, loop):
         eta = elapsed / i * (loop - i)
         print(f"Iter {i:4d}/{loop-1}  RMSE={RMSE[i]:.5f}  elapsed={elapsed:.1f}s  ETA={eta:.0f}s")
     if abs(diff_RMSE) < 0.00023 and RMSE[i] > 0.035:
+    # if i% 50 == 0:
         print(f"VAH APPLIED at iter {i}")
         # MATLAB-consistent VAH branch on full padded field
         pha = cp.asnumpy(cp.angle(es))
