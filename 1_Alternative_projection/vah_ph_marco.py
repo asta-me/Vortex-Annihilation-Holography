@@ -27,6 +27,18 @@ Compared with the baseline script `vah_ph.py`, this version introduces:
     - Live plotting can be disabled (`live_plotting=False`) to reduce overhead.
     - RMSE is accumulated on GPU and gathered at the end for plotting.
 
+6) Target scaling and metric consistency
+        - Target intensity is normalized before optimization:
+            `F1 = F1 / (max(F1) + 1e-12)`.
+        - A floor is then applied: `F1 = max(F1, 1e-3)`.
+            This sets an operational zero and avoids null pixels in the target.
+        - With this convention, target values are in approximately `[1e-3, 1]`,
+            so RMSE is on a scale comparable across runs and closer to paper-style
+            interpretation than raw 0..255 image intensities.
+        - Optionally, NRMSE can be reported for cross-image comparisons, e.g.
+            `NRMSE = RMSE / (max(target) - min(target))` where range is about 0.999
+            after applying the `1e-3` floor.
+
 Usage
 -----
 1. Set core parameters:
@@ -73,10 +85,14 @@ mixing_parameter = 0.5                   # Mixing parameter for energy distribut
 # We can either select a diff and rmse criterion (like in the original paper)
 # or Just apply vah every N iterations
 # Comment or uncomment the if condition in the main loop accordingly
-iters = 500
+iters = 300
 vah_application_interval = 100             # Apply VAH every N iterations (if using interval-based application)
-diff_threshold = 0.00023                                            # Original difference threshold for applying VAH
-rmse_threshold = 0.035                                              # Original RMSE threshold for applying VAH
+# diff_threshold = 0.00023                                            # Original difference threshold for applying VAH
+# rmse_threshold = 0.035                                              # Original RMSE threshold for applying VAH
+
+diff_threshold = 0.00001                                           # Set Manually
+rmse_threshold = 0.035                                              # Set Manually
+
 
 input_image_path = "Cat_black.tif"       # Target Image intensity path
 # input_image_path = "Cat_1.tif"
@@ -105,12 +121,18 @@ def sinc_interpol(image: cp.ndarray) -> cp.ndarray:
 #%% ---------- Import target ----------
 F1 = imread(input_image_path).astype(np.float32)
 F1 = resize(F1, (res, res), order=1, preserve_range=True, anti_aliasing=True).astype(np.float32)
+
+F1 = F1 / (np.max(F1) + 1e-12)  # Normalize target to [0,1]
+F1=np.maximum(F1,1e-3)          # Avoid zeros in target [see article]
 n = m = res
 nn = mm = work_size
 F1_work = sinc_interpol(cp.asarray(F1)) # 2N x 2N sinc upsampling
+
+
 E = np.sum(F1)                          # Target Energy
 El = mixing_parameter * E               # Noise Energy 
 F = cp.sqrt(F1_work)                    # Amplitude on 2N x 2N grid
+
 
 # --- Initial phase and amplitude ---
 # Set a random seed for reproducibility
@@ -220,8 +242,8 @@ for i in range(1, iters):
         print(f"Iter {i:4d}/{iters-1}  RMSE={rmse_i:.5f}  elapsed={elapsed:.1f}s  Tempo mancante={eta:.0f}s")
 
     # My proposal to only apply vah to slm region + some borders
-    # if abs(diff_RMSE) < diff_threshold and RMSE[i] > rmse_threshold:
-    if i % vah_application_interval == 0:
+    if abs(diff_RMSE) < diff_threshold and RMSE_gpu[i] > rmse_threshold:
+    # if i % vah_application_interval == 0:
         print(f"VAH APPLIED at iter {i}")
         pha = cp.angle(es)  # pha: cp.ndarray
 
