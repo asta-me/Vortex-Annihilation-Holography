@@ -11,16 +11,17 @@ Compared with the baseline script `vah_ph.py`, this version introduces:
 
 2) Upsampling strategy
     - Input target is first resized to `res x res`.
-    - Then a sinc-like 2x upsampling (`sinc_interpol`) builds a `2*res x 2*res`
-      computational grid for holographic propagation.
+        - Then a configurable 2x upsampling builds a `2*res x 2*res`
+            computational grid for holographic propagation.
+        - Supported methods: `sinc` and `nearest`.
 
 3) Configurable signal region (SR)
     - SR is a centered square `M x M` defined by mask (`bandlim_in`).
     - RMSE is computed only on SR support (`sr_idx`), not on the full plane.
 
-4) VAH localized to active SLM area
-    - Vortex elimination/detection is run on a crop around active SLM
-      (`r0_vah:r1_vah, c0_vah:c1_vah`) with optional `padding_vah`.
+4) VAH localized to target Signal Region (SR)
+        - Vortex elimination/detection is run on the SR crop used for the target
+            metric (`sr_r0:sr_r1, sr_c0:sr_c1`).
 
 5) Faster GPU execution path
     - Main iterative loop uses CuPy arrays.
@@ -73,28 +74,29 @@ from skimage.transform import resize
 from skimage.io import imread, imsave
 
 #%% ---------- System parameters ----------
-lamda = 632e-6                           # [mm] Wavelength in mm
+lamda = 520e-6                           # [mm] Wavelength in mm
 dh = 0.008                               # [mm] Pixel pitch
-res = 540                                # SLM/output hologram size (NxN)
+res = 1080                                # SLM/output hologram size (NxN)
 work_size = 2 * res                      # Computational grid size (2N x 2N)
-live_plotting = False                    # Whether to show live updates of the reconstruction during iterations  
-padding_vah = 0                          # Extra pixels around active SLM region used for VAH crop
-M = 400                                  # Signal region is central MxM pixel
+
+live_plotting = False                     # Whether to show live updates of the reconstruction during iterations  
+M = 480                                  # Signal region is central MxM pixel (in the resampled 2N x 2N grid)
 mixing_parameter = 0.5                   # Mixing parameter for energy distribution
+upsampling_method = "sinc"               # "sinc" or "nearest" for building the 2N x 2N target grid
 
+iters = 600
 # We can either select a diff and rmse criterion (like in the original paper)
-# or Just apply vah every N iterations
+# or just apply vah every N iterations
 # Comment or uncomment the if condition in the main loop accordingly
-iters = 300
-vah_application_interval = 100             # Apply VAH every N iterations (if using interval-based application)
-# diff_threshold = 0.00023                                            # Original difference threshold for applying VAH
-# rmse_threshold = 0.035                                              # Original RMSE threshold for applying VAH
 
-diff_threshold = 0.00001                                           # Set Manually
-rmse_threshold = 0.035                                              # Set Manually
+vah_application_interval = 200             # Apply VAH every N iterations (if using interval-based application)
+# diff_threshold = 0.00023                 # Original difference threshold for applying VAH
+# rmse_threshold = 0.035                   # Original RMSE threshold for applying VAH
+diff_threshold = 0.00001                   # Set Manually
+rmse_threshold = 0.035                     # Set Manually
 
 
-input_image_path = "Cat_black.tif"       # Target Image intensity path
+input_image_path = "Cat_black.tif"          # Target Image intensity path
 # input_image_path = "Cat_1.tif"
 # input_image_path = "Cat_2.tif"
 
@@ -118,21 +120,36 @@ def sinc_interpol(image: cp.ndarray) -> cp.ndarray:
         up *= (in_energy / out_energy)
     return up.astype(cp.float32)
 
+
+def upsample_target(image: np.ndarray, method: str, out_size: int) -> cp.ndarray:
+    """Upsample target intensity to the computational grid."""
+    if method == "sinc":
+        return sinc_interpol(cp.asarray(image))
+    if method == "nearest":
+        up = resize(
+            image,
+            (out_size, out_size),
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False,
+        ).astype(np.float32)
+        return cp.asarray(up)
+    raise ValueError(f"Unsupported upsampling_method: {method}")
+
 #%% ---------- Import target ----------
-F1 = imread(input_image_path).astype(np.float32)
-F1 = resize(F1, (res, res), order=1, preserve_range=True, anti_aliasing=True).astype(np.float32)
 
-F1 = F1 / (np.max(F1) + 1e-12)  # Normalize target to [0,1]
-F1=np.maximum(F1,1e-3)          # Avoid zeros in target [see article]
+F1 = imread(input_image_path).astype(np.float32)                                                 # Import img
+F1 = resize(F1, (res, res), order=1, preserve_range=True, anti_aliasing=True).astype(np.float32) # Resize to SLM size
+F1 = F1 / (np.max(F1) + 1e-12)                                                                   # Normalize target to [0,1]
+F1=np.maximum(F1,1e-3)                                                                           # Avoid zeros in target [see article, zero intensity, raises undetermined phase]
+
 n = m = res
-nn = mm = work_size
-F1_work = sinc_interpol(cp.asarray(F1)) # 2N x 2N sinc upsampling
-
+nn = mm = work_size                                                     
+F1_work = upsample_target(F1, upsampling_method, work_size)                                      # 2N x 2N target upsampling
 
 E = np.sum(F1)                          # Target Energy
 El = mixing_parameter * E               # Noise Energy 
 F = cp.sqrt(F1_work)                    # Amplitude on 2N x 2N grid
-
 
 # --- Initial phase and amplitude ---
 # Set a random seed for reproducibility
@@ -161,6 +178,7 @@ target_sr = cp.asarray(F1_work[sr_idx])
 
 # Incident intensity measured on the SLM
 incident_np = imread("Input_Gaussian.tiff").astype(np.float32)
+# Resize to SLM size if needed
 if incident_np.shape != (n, m):
     incident_np = resize(incident_np, (n, m), order=1, preserve_range=True, anti_aliasing=True).astype(np.float32)
 incident_cp = cp.asarray(incident_np)                          # Bring on GPU
@@ -171,12 +189,7 @@ incident = cp.zeros((nn, mm), dtype=cp.float32)                # Pad to working 
 incident[active_rows, active_cols] = incident_cp
 
 
-# VAH is now not performd on all of the 2N x 2N grid, but only on the active SLM region + some padding
-# Define VAH crop indices with padding
-r0_vah = active_rows.start - padding_vah
-r1_vah = active_rows.stop + padding_vah
-c0_vah = active_cols.start - padding_vah
-c1_vah = active_cols.stop + padding_vah
+# VAH is applied on the target Signal Region (SR) only.
 
 #%% --- Iterative alternative projection with VAH ---
 RMSE = np.zeros(iters)                                               # Root mean square error
@@ -241,31 +254,31 @@ for i in range(1, iters):
         eta = elapsed / i * (iters - i)
         print(f"Iter {i:4d}/{iters-1}  RMSE={rmse_i:.5f}  elapsed={elapsed:.1f}s  Tempo mancante={eta:.0f}s")
 
-    # My proposal to only apply vah to slm region + some borders
-    if abs(diff_RMSE) < diff_threshold and RMSE_gpu[i] > rmse_threshold:
-    # if i % vah_application_interval == 0:
+    # Apply VAH on the target Signal Region (SR) only.
+    # if abs(diff_RMSE) < diff_threshold and RMSE_gpu[i] > rmse_threshold:
+    if i % vah_application_interval == 0:
         print(f"VAH APPLIED at iter {i}")
         pha = cp.angle(es)  # pha: cp.ndarray
 
-        # Crop
-        pha_crop = pha[r0_vah:r1_vah, c0_vah:c1_vah]
+        # Crop to SR
+        pha_crop = pha[sr_r0:sr_r1, sr_c0:sr_c1]
 
-        # Vortex elimination
+        # Vortex elimination        
         pha_vfree_crop = function_vortex_elimination_accegpu(pha_crop, dh, use_cupy=True, gather_output=False)
 
-        # Vortex detection su GPU
+        # Vortex detection su GPU (Qui ridarà zero vortici, ma è utile per il conteggio)
         NUM_PO_i, NUM_NE_i = function_vortex_detection_accegpu(pha_vfree_crop, dh, use_cupy=True)
         NUM_PO[i], NUM_NE[i] = NUM_PO_i, NUM_NE_i
 
         # Reconstruct full phase map with vortex-free crop
         pha_vfree = pha.copy()
-        pha_vfree[r0_vah:r1_vah, c0_vah:c1_vah] = pha_vfree_crop
+        pha_vfree[sr_r0:sr_r1, sr_c0:sr_c1] = pha_vfree_crop
 
         phi = cp.exp(1j * pha_vfree)
     
     else:
         phi = cp.exp(1j * cp.angle(es))
-        phi_in_crop = cp.angle(phi)[r0_vah:r1_vah, c0_vah:c1_vah]
+        phi_in_crop = cp.angle(phi)[sr_r0:sr_r1, sr_c0:sr_c1]
         NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(phi_in_crop, dh, use_cupy=True)
 
 t_total = time.perf_counter() - t_start
@@ -317,7 +330,5 @@ phase_active = cp.asnumpy(phase_slm[active_rows, active_cols])
 phase_bmp = np.uint8(np.round((phase_active / (2 * np.pi)) * 255.0))
 imsave("output_phase_red.bmp", phase_bmp, check_contrast=False)
 print(f"Saved output phase BMP: output_phase.bmp with shape {phase_bmp.shape}")
-
-
 
 # %%

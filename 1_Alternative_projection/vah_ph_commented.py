@@ -61,6 +61,12 @@ bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)                   # Signal Reg
 bandlim_in[(nn - n)//2:(nn + n)//2, (mm - m)//2:(mm + m)//2] = 1.0  # My correction, include all signal region     
 bandlim_ou = 1.0 - bandlim_in                                       # Noise region NR
 
+# SR crop indices (target image support in the 2N x 2N plane)
+sr_r0 = (nn - n)//2
+sr_r1 = (nn + n)//2
+sr_c0 = (mm - m)//2
+sr_c1 = (mm + m)//2
+
 # Incident Gaussian
 w = 0.26                                                            # [mm] Beam waist of the incident Gaussian
 ox, oy = cp.meshgrid(cp.linspace(-dh*mm/2, dh*mm/2, mm), cp.linspace(-dh*nn/2, dh*nn/2, nn))
@@ -68,18 +74,12 @@ Gaussian = cp.exp(-((ox**2)+(oy**2))/w)
 incident = Gaussian * bandlim_spe                                   # Incident field * SLM aperture mask
 
 #%% --- Iterative alternative projection with VAH ---
-loop = 200
+loop = 250
 diff_threshold = 0.00023                                            # Original difference threshold for applying VAH
 rmse_threshold = 0.035                                              # Original RMSE threshold for applying VAH
 RMSE = np.zeros(loop)                                               # Root mean square error
 NUM_PO = np.zeros(loop, dtype=int)                                  # Number of positive vortices    
 NUM_NE = np.zeros(loop, dtype=int)                                  # Number of negative vortices
-
-padding_vah = 0                                                     # Extra pixels around active SLM region used for VAH crop
-r0_vah = (nn - n)//2 - padding_vah
-r1_vah = (nn - n)//2 + n + padding_vah
-c0_vah = (mm - m)//2 - padding_vah
-c1_vah = (mm - m)//2 + m + padding_vah
 
 F_gpu = cp.asarray(F)
 F1_gpu = cp.asarray(F1)
@@ -153,29 +153,29 @@ for i in range(1, loop):
     # NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(phi_in, dh, use_cupy=False)
 
 
-    # My proposal to only apply vah to slm region + some borders
+    # Apply VAH only on the target Signal Region (SR), not on an SLM-defined crop.
     if abs(diff_RMSE) < diff_threshold and RMSE[i] > rmse_threshold:
         print(f"VAH APPLIED at iter {i}")
-        pha = cp.asnumpy(cp.angle(es))  # Phase on SLM region
+        pha = cp.asnumpy(cp.angle(es))
 
-        # Re-define the region of interest for VAH: SLM region + some padding
-        pha_crop = pha[r0_vah:r1_vah, c0_vah:c1_vah]
+        # VAH ROI = SR
+        pha_crop = pha[sr_r0:sr_r1, sr_c0:sr_c1]
 
-        # Vortex elimination solo sul crop
+        # Vortex elimination only on SR crop
         pha_vfree_crop = function_vortex_elimination_accegpu(pha_crop, dh, use_cupy=False)
 
-        # Vortex detection only onh the active region
+        # Vortex detection on SR crop
         NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(pha_vfree_crop, dh, use_cupy=False)
 
-        # Ricostruisci la matrice fase grande
+        # Rebuild full phase map with SR vortex-free patch
         pha_vfree = pha.copy()
-        pha_vfree[r0_vah:r1_vah, c0_vah:c1_vah] = pha_vfree_crop
+        pha_vfree[sr_r0:sr_r1, sr_c0:sr_c1] = pha_vfree_crop
 
         phi = cp.exp(1j * cp.asarray(pha_vfree))
     
     else:
         phi = cp.exp(1j * cp.angle(es))
-        phi_in_crop = cp.asnumpy(cp.angle(phi))[r0_vah:r1_vah, c0_vah:c1_vah]
+        phi_in_crop = cp.asnumpy(cp.angle(phi))[sr_r0:sr_r1, sr_c0:sr_c1]
         NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(phi_in_crop, dh, use_cupy=False)
 
 t_total = time.perf_counter() - t_start
@@ -198,9 +198,19 @@ I_final = I_final[(nn//2-n//2):(nn//2+n//2), (mm//2-m//2):(mm//2+m//2)]
 I_final = E_gpu * I_final / cp.sum(I_final)
 NUM = NUM_PO + NUM_NE
 
+# Extract phase at focal plane
+Rec_cropped = Rec[(nn//2-n//2):(nn//2+n//2), (mm//2-m//2):(mm//2+m//2)]
+Phase_final = cp.mod(cp.angle(Rec_cropped), 2 * cp.pi)
+
 plt.figure()
 plt.imshow(cp.asnumpy(I_final), cmap="gray")
-plt.title("Final reconstructed intensity (VAH PH)")
+plt.title("Final reconstructed intensity at focal plane (VAH PH)")
+plt.show()
+
+plt.figure()
+plt.imshow(cp.asnumpy(Phase_final), cmap="hsv")
+plt.colorbar(label="Phase (radians)")
+plt.title("Final reconstructed phase at focal plane (VAH PH)")
 plt.show()
 
 print(f"Final RMSE: {RMSE[-1]:.6f}")
