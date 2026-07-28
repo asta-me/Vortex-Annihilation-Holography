@@ -45,6 +45,7 @@ def function_vortex_elimination_accegpu(
     *,
     use_cupy: bool | None = None,
     gather_output: bool = True,
+    return_correction: bool = False,
 ):
     """Eliminate detected phase vortexes from a wrapped phase map.
 
@@ -53,9 +54,14 @@ def function_vortex_elimination_accegpu(
         dh: Sampling pitch (same meaning as MATLAB code).
         use_cupy: True to force CuPy, False to force NumPy, None to auto.
         gather_output: True to return NumPy array (MATLAB gather behavior).
+        return_correction: True to also return the vortex correction field `vor`
+            (the summed arctan2 vortex phase, `vor_po_phase - vor_ne_phase`). This
+            enables a relaxed operator `mod(pha - alpha*vor, 2*pi)` outside this
+            function (alpha=1 reproduces the full elimination returned here).
 
     Returns:
-        Phase map without detected vortexes, wrapped in [0, 2*pi).
+        Phase map without detected vortexes, wrapped in [0, 2*pi). If
+        `return_correction` is True, returns the tuple `(pha_vfree, vor)`.
     """
     xp = _get_array_module(pha, use_cupy)
     pha_xp = xp.asarray(pha)
@@ -109,7 +115,11 @@ def function_vortex_elimination_accegpu(
     pha_vfree = xp.mod(pha_xp - vor, 2 * xp.pi)
 
     if gather_output:
-        return _to_numpy(pha_vfree)
+        pha_vfree = _to_numpy(pha_vfree)
+        vor = _to_numpy(vor)
+
+    if return_correction:
+        return pha_vfree, vor
     return pha_vfree
 
 

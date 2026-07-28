@@ -40,7 +40,7 @@ amp = cp.random.rand(nn, mm)
 bandlim_spe = cp.zeros((nn, mm), dtype=cp.float32)
 bandlim_spe[nn//4:3*nn//4, mm//4:3*mm//4] = 1.0
 bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)
-bandlim_in[nn//4:3*nn//4, mm//4:3*mm//4] = 1.0
+bandlim_in[(nn-n)//2:(nn+n)//2, (mm-m)//2:(mm+m)//2] = 1.0
 bandlim_ou = 1.0 - bandlim_in
 # Incident Gaussian
 w = 0.26
@@ -49,7 +49,7 @@ Gaussian = cp.exp(-((ox**2)+(oy**2))/w)
 incident = bandlim_spe * Gaussian
 
 # --- Iterative alternative projection with VAH ---
-loop = 200
+loop = 300
 RMSE = np.zeros(loop)
 NUM_PO = np.zeros(loop, dtype=int)
 NUM_NE = np.zeros(loop, dtype=int)

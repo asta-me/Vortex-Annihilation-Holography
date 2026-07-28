@@ -42,12 +42,10 @@ El = 0.5 * E                            # Energy for the "outer" region in the V
 
 
 F = np.abs(np.sqrt(F1))                                             # Amplitude of the target field (sqrt of intensity) (why abs?)
-F = np.pad(F, ((n//4, n//4), (m//4, m//4)), mode="constant")        # Pad to 1024x1024 with zeros (constant padding)
-nn, mm = F.shape                                                    # Dimensions after padding (should be 1024x1024)
+F = np.pad(F, ((n//4, n//4), (m//4, m//4)), mode="constant")        # Pad by n/4 each side (512 -> 768) with zeros (constant padding)
+nn, mm = F.shape                                                    # Dimensions after padding (should be 768x768)
 
 # --- Initial phase and amplitude ---
-# Set a random seed for reproducibility
-cp.random.seed(42)
 phi = cp.exp(1j * 2 * cp.pi * cp.random.rand(nn, mm))               # Random initial phase (complex exponential of random values in [0,1))
 amp = cp.random.rand(nn, mm)                                        # Random initial amplitude (Initial guess for target noise region)
 
@@ -61,12 +59,6 @@ bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)                   # Signal Reg
 bandlim_in[(nn - n)//2:(nn + n)//2, (mm - m)//2:(mm + m)//2] = 1.0  # My correction, include all signal region     
 bandlim_ou = 1.0 - bandlim_in                                       # Noise region NR
 
-# SR crop indices (target image support in the 2N x 2N plane)
-sr_r0 = (nn - n)//2
-sr_r1 = (nn + n)//2
-sr_c0 = (mm - m)//2
-sr_c1 = (mm + m)//2
-
 # Incident Gaussian
 w = 0.26                                                            # [mm] Beam waist of the incident Gaussian
 ox, oy = cp.meshgrid(cp.linspace(-dh*mm/2, dh*mm/2, mm), cp.linspace(-dh*nn/2, dh*nn/2, nn))
@@ -74,7 +66,7 @@ Gaussian = cp.exp(-((ox**2)+(oy**2))/w)
 incident = Gaussian * bandlim_spe                                   # Incident field * SLM aperture mask
 
 #%% --- Iterative alternative projection with VAH ---
-loop = 250
+loop = 300
 diff_threshold = 0.00023                                            # Original difference threshold for applying VAH
 rmse_threshold = 0.035                                              # Original RMSE threshold for applying VAH
 RMSE = np.zeros(loop)                                               # Root mean square error
@@ -135,48 +127,22 @@ for i in range(1, loop):
         eta = elapsed / i * (loop - i)
         print(f"Iter {i:4d}/{loop-1}  RMSE={RMSE[i]:.5f}  elapsed={elapsed:.1f}s  ETA={eta:.0f}s")
     
-    # Condition to apply vortex annihilation (pretty arbitrary)
-    # if abs(diff_RMSE) < diff_threshold and RMSE[i] > rmse_threshold:
-    #     print(f"VAH APPLIED at iter {i}")
-    #     pha = cp.asnumpy(cp.angle(es))                          # Phase on SLM region
-    #     pha_in = pha * cp.asnumpy(bandlim_in)                   # Phase on SLM
-    #     pha_vfree = function_vortex_elimination_accegpu(pha_in, dh, use_cupy=False) # Vortex elimination in the SLM plane, returns vortex-free phase
-    #     NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(pha_vfree, dh, use_cupy=False) # Count vortices in the vortex-free phase to verify elimination
-    #     # Combine vortex-free phase in signal region with original phase in noise region
-    #     # (useless mixing we only propagate amplitude from the central region the intensity)
-    #     pha_vfree = cp.asnumpy(bandlim_in) * pha_vfree + cp.asnumpy(bandlim_ou) * pha 
-    #     phi = cp.exp(1j * cp.asarray(pha_vfree))
-
-    # else:
-    # phi = cp.exp(1j * cp.angle(es))
-    # phi_in = cp.asnumpy(cp.angle(phi)) * cp.asnumpy(bandlim_in)
-    # NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(phi_in, dh, use_cupy=False)
-
-
-    # Apply VAH only on the target Signal Region (SR), not on an SLM-defined crop.
+    # Condition to apply vortex annihilation (arbitrary threshold, from the original paper)
+    # VAH is triggered when the RMSE has stabilized (small change) but is still above threshold
     if abs(diff_RMSE) < diff_threshold and RMSE[i] > rmse_threshold:
         print(f"VAH APPLIED at iter {i}")
-        pha = cp.asnumpy(cp.angle(es))
+        pha = cp.asnumpy(cp.angle(es))                             # Object-plane phase (full 768x768)
+        pha_in = pha * cp.asnumpy(bandlim_in)                      # Keep phase only in the signal region (zeroed outside)
+        pha_vfree = function_vortex_elimination_accegpu(pha_in, dh, use_cupy=False)          # Vortex-free (irrotational) phase
+        NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(pha_vfree, dh, use_cupy=False)  # Verify elimination (should be ~0)
+        # Vortex-free phase in the signal region, original phase in the noise region
+        pha_vfree = cp.asnumpy(bandlim_in) * pha_vfree + cp.asnumpy(bandlim_ou) * pha
+        phi = cp.exp(1j * cp.asarray(pha_vfree))                   # Feed the irrotational phase into the next iteration
 
-        # VAH ROI = SR
-        pha_crop = pha[sr_r0:sr_r1, sr_c0:sr_c1]
-
-        # Vortex elimination only on SR crop
-        pha_vfree_crop = function_vortex_elimination_accegpu(pha_crop, dh, use_cupy=False)
-
-        # Vortex detection on SR crop
-        NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(pha_vfree_crop, dh, use_cupy=False)
-
-        # Rebuild full phase map with SR vortex-free patch
-        pha_vfree = pha.copy()
-        pha_vfree[sr_r0:sr_r1, sr_c0:sr_c1] = pha_vfree_crop
-
-        phi = cp.exp(1j * cp.asarray(pha_vfree))
-    
     else:
-        phi = cp.exp(1j * cp.angle(es))
-        phi_in_crop = cp.asnumpy(cp.angle(phi))[sr_r0:sr_r1, sr_c0:sr_c1]
-        NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(phi_in_crop, dh, use_cupy=False)
+        phi = cp.exp(1j * cp.angle(es))                           # No VAH: keep the propagated phase as-is
+        phi_in = cp.asnumpy(cp.angle(phi)) * cp.asnumpy(bandlim_in)                          # Phase in the signal region
+        NUM_PO[i], NUM_NE[i] = function_vortex_detection_accegpu(phi_in, dh, use_cupy=False)  # Count natural (un-annihilated) vortices
 
 t_total = time.perf_counter() - t_start
 print(f"\nDone! Total time: {t_total:.1f}s ({t_total/60:.1f} min)")

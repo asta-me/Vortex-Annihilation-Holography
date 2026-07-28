@@ -17,7 +17,7 @@ Compared with the baseline script `vah_ph.py`, this version introduces:
 
 3) Configurable signal region (SR)
     - SR is a centered square `M x M` defined by mask (`bandlim_in`).
-    - RMSE is computed only on SR support (`sr_idx`), not on the full plane.
+    - RMSE is computed only on the SR crop, not on the full plane.
 
 4) VAH localized to target Signal Region (SR)
         - Vortex elimination/detection is run on the SR crop used for the target
@@ -39,6 +39,31 @@ Compared with the baseline script `vah_ph.py`, this version introduces:
         - Optionally, NRMSE can be reported for cross-image comparisons, e.g.
             `NRMSE = RMSE / (max(target) - min(target))` where range is about 0.999
             after applying the `1e-3` floor.
+
+7) Physical parameters retuned for the experimental setup
+    - `lamda = 520e-6` mm, `dh = 0.008` mm, `res = 1080` (vs 532 nm / 0.00374 mm / 512
+      in the MATLAB baseline).
+
+8) VAH triggering
+    - VAH is applied on a fixed interval (`i % vah_application_interval == 0`) instead of
+      the RMSE-plateau condition (`|diff_RMSE| < diff_threshold and RMSE > rmse_threshold`).
+    - The RMSE-based condition is kept commented in the loop and can be re-enabled.
+
+9) Region normalization simplification
+    - `norm_in = sqrt(E)`, `norm_ou = sqrt(El)` (algebraically identical to the baseline
+      `sqrt(E*amp_in^2/sum(amp_in^2))`, just written explicitly).
+
+10) Incident field normalization
+    - Measured incident intensity is converted to amplitude, then min-subtracted and
+      max-normalized before being embedded in the active SLM window.
+
+11) SR-only RMSE normalization
+    - The reconstructed intensity is cropped to the SR and renormalized to the SR target
+      energy `E_sr = sum(target_sr)` before computing RMSE, so the metric is comparable
+      with `vah_ph_commented.py` (which also normalizes on the SR only).
+
+12) Output
+    - The final active-SLM phase is saved as an 8-bit BMP (`output_phase_red.bmp`).
 
 Usage
 -----
@@ -80,7 +105,7 @@ res = 1080                                # SLM/output hologram size (NxN)
 work_size = 2 * res                      # Computational grid size (2N x 2N)
 
 live_plotting = False                     # Whether to show live updates of the reconstruction during iterations  
-M = 480                                  # Signal region is central MxM pixel (in the resampled 2N x 2N grid)
+M = 1080                                  # Signal region is central MxM pixel (in the resampled 2N x 2N grid)
 mixing_parameter = 0.5                   # Mixing parameter for energy distribution
 upsampling_method = "sinc"               # "sinc" or "nearest" for building the 2N x 2N target grid
 
@@ -172,9 +197,9 @@ sr_c0, sr_c1 = (mm - M) // 2, (mm + M) // 2
 bandlim_in[sr_r0:sr_r1, sr_c0:sr_c1] = 1.0                          # Signal Region SR
 bandlim_ou = 1.0 - bandlim_in                                       # Noise region NR
 
-# SR indices derived from mask.
-sr_idx = cp.where(bandlim_in > 0)
-target_sr = cp.asarray(F1_work[sr_idx])
+# SR target (2D crop) and its energy, used for SR-only RMSE normalization.
+target_sr = F1_work[sr_r0:sr_r1, sr_c0:sr_c1]
+E_sr = cp.sum(target_sr)
 
 # Incident intensity measured on the SLM
 incident_np = imread("Input_Gaussian.tiff").astype(np.float32)
@@ -226,22 +251,22 @@ for i in range(1, iters):
     # Scale Energy in signal region to E, and Energy in noise region to El (0.5*E)
     amp = norm_in * (amp_in / (cp.sqrt(cp.sum(amp_in ** 2)) + 1e-12)) + norm_ou * (amp_ou / (cp.sqrt(cp.sum(amp_ou ** 2)) + 1e-12))
     
-    # Reconstructed intensity on full 2N x 2N target plane.
-    I_full = amp ** 2
-    I_full = E_gpu * I_full / (cp.sum(I_full) + 1e-12)
+    # Reconstructed intensity on the signal region (SR) only, renormalized to the SR
+    # target energy E_sr so the RMSE is comparable with vah_ph_commented.py.
+    I_sr = amp[sr_r0:sr_r1, sr_c0:sr_c1] ** 2
+    I_sr = E_sr * I_sr / (cp.sum(I_sr) + 1e-12)
     
     # Visual feedback
     if live_plotting:
         if i % 20 == 0 or i == iters - 1:
             # Small 2D display crop using the configured SR rectangle.
-            I = I_full[sr_r0:sr_r1, sr_c0:sr_c1]
             ax.clear()
-            ax.imshow(cp.asnumpy(I), cmap="gray")
+            ax.imshow(cp.asnumpy(I_sr), cmap="gray")
             ax.set_title(f"Iteration {i}")
             plt.pause(0.01)
     
-    # Compute RMSE directly on mask support.
-    diff_sq_sr = (I_full[sr_idx] - target_sr) ** 2
+    # Compute RMSE on the SR support.
+    diff_sq_sr = (I_sr - target_sr) ** 2
     mse = cp.mean(diff_sq_sr)
     # RMSE[i] = float(cp.sqrt(mse).get())
     RMSE_gpu[i] = cp.sqrt(mse)
