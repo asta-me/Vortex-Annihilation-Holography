@@ -35,6 +35,7 @@ e [function_vortex_elimination_accegpu.py](../1_Alternative_projection/function_
 - [Appendice J — Nota sperimentale: strategia di alpha (costante vs schedulato)](#appendice-j--nota-sperimentale-strategia-di-alpha-costante-vs-schedulato)
 - [Appendice K — Nota sperimentale: Poisson periodico/a-stagnazione e tempi](#appendice-k--nota-sperimentale-poisson-periodicoa-stagnazione-e-tempi)
 - [Appendice L — Nota sperimentale: weighted/masked Poisson solve (accantonato)](#appendice-l--nota-sperimentale-weightedmasked-poisson-solve-accantonato)
+- [Appendice M — Inizializzazione: diffusore random “matched” alla signal region](#appendice-m--inizializzazione-diffusore-random-matched-alla-signal-region)
 
 ---
 
@@ -544,6 +545,42 @@ il blend (cambia *quanto* si mixa $\psi$, non $\psi$). Script:
 solo (a)+(b) insieme si avvicinano al paper (7.19 vs 6.66, molto più liscio) ma il risultato è
 **sensibile** alle soglie/softness → non robusto. Alzare il **floor** (Appendice I) è una leva più
 semplice, forte e stabile. L'approccio con pesi resta come riferimento ma è **accantonato**.
+
+---
+
+## Appendice M — Inizializzazione: diffusore random “matched” alla signal region
+
+**Contesto.** A convergenza l'errore residuo **non sono i vortici** (diagnosi: 0% dell'errore ai
+core, ~82% nel segnale luminoso), ma il *floor* del phase-retrieval. L'unica leva che lo sfonda è
+l'**inizializzazione di fase**.
+
+**Cosa abbiamo trovato** (marmo):
+- Init **random**: RMSE ~8.9 (semina ~87000 vortici, bacino di convergenza scadente).
+- Init **quadratica** (lente, $\varphi=c(u^2+v^2)$): RMSE ~4.9, ma **target-dependent** (una lente
+  tarata su target quadrato/uniforme) e non diversa.
+- Init **random liscia** (diffusore): con i parametri giusti (sweep smoothness $\times$ ampiezza)
+  **batte** la quadratica (fino a ~4.2), ma l'ottimo sembrava piccato e da tarare.
+
+**Il criterio (principiato e target-independent).**
+> Scegli la fase liscia tale che la **sua trasformata cada dentro la signal region**.
+
+L'init è un **diffusore random**: il suo spread in campo lontano deve **riempire la SR** — non meno
+(luce concentrata → speckle) né più (luce fuori dalla SR → persa). Lo spread ottimo è una quantità
+**geometrica** ($N$ e $M$, non l'immagine) → **target-independent per costruzione**. Nel codice si
+genera un campo liscio (low-pass di rumore bianco) e si **auto-tara l'ampiezza** (bisezione) finché
+il raggio RMS del campo lontano di $e^{i\varphi}$ eguaglia $\sim (M/2)\cdot\text{fill}$; si verifica
+che la **frazione di energia in-SR** sia alta. Empiricamente le celle migliori dello sweep
+clusterizzano su $\text{amp}\cdot\text{ks}\approx\text{cost}$, coerente con "spread $\propto$ amp·ks =
+dimensione SR".
+
+**Risultato** (marmo, floor 5e-3; [vah_projector_smooth_init.py](vah_projector_smooth_init.py)):
+diffusore matched RMSE **4.8–5.6** su 3 seed (best 4.81 $<$ quadratica 4.88), in-SR frac ~0.92,
+ampiezza auto ~20, vortici finali ~0 — **senza brute force**. Essendo random è **diverso per seed**
+→ **multiplexabile** (media incoerente di $N$ frame → speckle giù ancora). È il *best of both worlds*:
+qualità della quadratica ma **principiato, target-independent e diverso**.
+
+**Nota.** Su target dark-heavy (Cat_black) a floor basso il vantaggio dell'init si attenua, ma lì il
+collo di bottiglia è il **floor** (Appendice I), non l'init.
 
 ---
 
