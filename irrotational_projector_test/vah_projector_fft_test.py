@@ -58,16 +58,27 @@ alpha_list = [0.0, 0.25, 0.5, 0.75, 1.0]  # Relaxation knob sweep (0 = off, 1 = 
 paper_x_list = [25, 50, 75, 100]          # Paper annihilation-period sweep (fair settled endpoint)
 seed = 42                                 # Reproducibility
 target_floor_rel = 5e-3                   # Relative floor wrt max(F1): prevents fully dark pixels
-target_floor_rel = 0.3                   # Relative floor wrt max(F1): prevents fully dark pixels
+
+#%% ---------- Geometry (fix the hologram size and the SR fraction; the rest is derived) ----------
+HOLOGRAM_SIZE = 384           # SLM aperture side [px] (= half the work grid; 2x oversampling)
+WORK_SIZE = 2 * HOLOGRAM_SIZE  # computational grid side [px]
+SR_FRACTION = 2 / 3           # signal-region side as a fraction of WORK_SIZE (image size)
+SR_SIZE = int(round(SR_FRACTION * WORK_SIZE)); SR_SIZE -= SR_SIZE % 2
+assert 0 < SR_SIZE <= WORK_SIZE, "SR_FRACTION out of range: signal region must fit the grid"
+pad_each = (WORK_SIZE - SR_SIZE) // 2      # center the SR inside the work grid
+ap0 = (WORK_SIZE - HOLOGRAM_SIZE) // 2     # SLM aperture offset
 
 #%% ---------- Import target (TIFF) ----------
-# input_tiff = "object_grayscale_from_mat.tif"  # Change this filename to run the same pipeline on another TIFF.
-input_tiff = "Cat_black.tif"  # Change this filename to run the same pipeline on another TIFF.
-# input_tiff = "Cat_1.tif"  # Change this filename to run the same pipeline on another TIFF.
-# input_tiff = "marmo.tif"  # Change this filename to run the same pipeline on another TIFF.
+# Target: uncomment ONE line (files live in ./targets/, or give an absolute path).
+input_tiff = "marmo.tif"
+# input_tiff = "object_grayscale_from_mat.tif"
+# input_tiff = "Lenna.tif"
+# input_tiff = "Baboon.tif"
+# input_tiff = "valentini.tif"
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-input_tiff_path = os.path.join(ALT_PROJ_DIR, input_tiff)
+TARGETS_DIR = os.path.join(script_dir, "targets")
+input_tiff_path = input_tiff if os.path.isabs(input_tiff) else os.path.join(TARGETS_DIR, input_tiff)
 if not os.path.isfile(input_tiff_path):
     raise FileNotFoundError(f"TIFF file not found: {input_tiff_path}")
 
@@ -76,19 +87,19 @@ if F1.ndim == 3:
     # Keep behavior deterministic for RGB/RGBA TIFFs: use the first channel.
     F1 = F1[..., 0]
 F1 = F1.astype(np.float32)
-F1 = cv2.resize(F1, (512, 512), interpolation=cv2.INTER_AREA)  # Resize to 512x512
+F1 = cv2.resize(F1, (SR_SIZE, SR_SIZE), interpolation=cv2.INTER_AREA)  # Resize to the signal-region size
 # Reuse Marco's floor idea without changing this script's global intensity scale.
 F1 = np.maximum(F1, target_floor_rel * (np.max(F1) + 1e-12))
 n, m = F1.shape
 E = np.sum(F1)                            # Target energy
 El = 0.5 * E                              # Noise-region energy
 F = np.abs(np.sqrt(F1))                   # Target amplitude
-F = np.pad(F, ((n//4, n//4), (m//4, m//4)), mode="constant")  # Pad 512 -> 768
+F = np.pad(F, ((pad_each, pad_each), (pad_each, pad_each)), mode="constant")  # Center SR in the work grid
 nn, mm = F.shape
 
 #%% ---------- Band-limitation masks ----------
-bandlim_spe = cp.zeros((nn, mm), dtype=cp.float32)             # SLM aperture (central 384)
-bandlim_spe[nn//4:3*nn//4, mm//4:3*mm//4] = 1.0
+bandlim_spe = cp.zeros((nn, mm), dtype=cp.float32)             # SLM aperture (central HOLOGRAM_SIZE)
+bandlim_spe[ap0:ap0+HOLOGRAM_SIZE, ap0:ap0+HOLOGRAM_SIZE] = 1.0
 bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)              # Signal region SR (central 512)
 bandlim_in[(nn-n)//2:(nn+n)//2, (mm-m)//2:(mm+m)//2] = 1.0
 bandlim_ou = 1.0 - bandlim_in                                  # Noise region NR
@@ -282,10 +293,24 @@ best_x = min(paper_x_list, key=lambda xx: paper_results[xx][0][-1])
 print(f"Best paper period x={best_x}  (settled RMSE={paper_results[best_x][0][-1]:.5f}, "
       f"vortices={paper_results[best_x][1][-1]})")
 
-#%% ---------- Plots ----------
-output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_test")
-os.makedirs(output_dir, exist_ok=True)                       # Folder for saved figures
+#%% ---------- Results table (simple markdown, regenerated each run) ----------
+target_name = os.path.splitext(os.path.basename(input_tiff))[0]
+tbl = [f"# Alpha-blend sweep — {target_name}",
+       f"geometry {HOLOGRAM_SIZE}/{WORK_SIZE}/{SR_SIZE}, loop={loop}, floor={target_floor_rel}",
+       "", "| method | final RMSE (SR) | final vortices |", "|---|---|---|"]
+for a in alpha_list:
+    R, N, _, _ = results[a]
+    tbl.append(f"| proj alpha={a} | {R[-1]:.4f} | {N[-1]} |")
+for x in paper_x_list:
+    R, N, _, _ = paper_results[x]
+    tbl.append(f"| paper x={x} | {R[-1]:.4f} | {N[-1]} |")
+table_md = "\n".join(tbl) + "\n"
+table_path = os.path.join(script_dir, f"results_alpha_{target_name}.md")
+with open(table_path, "w", encoding="utf-8") as fh:
+    fh.write(table_md)
+print(f"\nResults table -> {table_path}")
 
+#%% ---------- Plots (all figures built, then a single plt.show() at the end) ----------
 best_paper_RMSE, best_paper_NUM, best_paper_I, best_paper_P = paper_results[best_x]
 alpha_show = 0.5 if 0.5 in results else alpha_list[-1]
 alpha_show = 1
@@ -300,8 +325,6 @@ plt.xlabel("Iteration")
 plt.ylabel("Natural vortex count (SR)")
 plt.title("Vortex count vs iteration: Poisson projector vs paper (fair)")
 plt.legend()
-fig.savefig(os.path.join(output_dir, "vortex_count.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
 # RMSE per iteration
 fig = plt.figure()
@@ -312,8 +335,6 @@ plt.xlabel("Iteration")
 plt.ylabel("RMSE (SR)")
 plt.title("RMSE vs iteration: Poisson projector vs paper (fair)")
 plt.legend()
-fig.savefig(os.path.join(output_dir, "rmse.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
 # Trade-off: final vortices vs final RMSE (settled)
 fig = plt.figure()
@@ -328,8 +349,6 @@ for x in paper_x_list:
 plt.xlabel("Final settled RMSE (SR)")
 plt.ylabel("Final settled vortex count (SR)")
 plt.title("Trade-off: singularities vs RMSE (settled)")
-fig.savefig(os.path.join(output_dir, "tradeoff.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
 # Reconstructed intensity: target vs baseline vs best paper vs projector
 int_panels = [
@@ -345,8 +364,6 @@ for ax, (title, img) in zip(axes, int_panels):
     ax.axis("off")
 plt.suptitle("Reconstructed intensity (SR)")
 plt.tight_layout()
-fig.savefig(os.path.join(output_dir, "reconstruction_intensity.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
 # Reconstructed phase at focal plane: baseline vs best paper vs projector
 pha_panels = [
@@ -362,9 +379,7 @@ for ax, (title, img) in zip(axes, pha_panels):
     ax.axis("off")
 fig.colorbar(im, ax=axes, fraction=0.025, label="Phase (rad)")
 plt.suptitle("Reconstructed phase at focal plane (SR)")
-fig.savefig(os.path.join(output_dir, "reconstruction_phase.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
-print(f"\nFigures saved to: {os.path.abspath(output_dir)}")
+plt.show()
 
 # %%

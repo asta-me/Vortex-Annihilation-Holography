@@ -22,13 +22,25 @@ from function_vortex_detection_accegpu import function_vortex_detection_accegpu
 
 #%% Config
 dh = 0.00374; loop = 300; seed = 42
-input_tiff = "marmo.tif"; target_floor_rel = 5e-3; alpha = 0.5
-n = m = 512; nn = n + 2*(n//4); mm = m + 2*(m//4)
+
+# Target: uncomment ONE line (files live in ./targets/, or give an absolute path).
+input_tiff = "marmo.tif"
+# input_tiff = "object_grayscale_from_mat.tif"
+# input_tiff = "Lenna.tif"
+# input_tiff = "Baboon.tif"
+# input_tiff = "valentini.tif"
+target_floor_rel = 5e-3; alpha = 0.5
+
+# Geometry (fix the hologram size and the SR fraction; the rest is derived)
+HOLOGRAM_SIZE = 384; WORK_SIZE = 2 * HOLOGRAM_SIZE; SR_FRACTION = 2 / 3
+SR_SIZE = int(round(SR_FRACTION * WORK_SIZE)); SR_SIZE -= SR_SIZE % 2
+n = m = SR_SIZE; nn = mm = WORK_SIZE
+pad_each = (WORK_SIZE - SR_SIZE) // 2; ap0 = (WORK_SIZE - HOLOGRAM_SIZE) // 2
 script_dir = os.path.dirname(os.path.abspath(__file__))
-output_dir = os.path.join(script_dir, "output_temp_init"); os.makedirs(output_dir, exist_ok=True)
+TARGETS_DIR = os.path.join(script_dir, "targets")
 
 #%% Grid + target
-bandlim_spe = cp.zeros((nn, mm), cp.float32); bandlim_spe[nn//4:3*nn//4, mm//4:3*mm//4] = 1.0
+bandlim_spe = cp.zeros((nn, mm), cp.float32); bandlim_spe[ap0:ap0+HOLOGRAM_SIZE, ap0:ap0+HOLOGRAM_SIZE] = 1.0
 bandlim_in = cp.zeros((nn, mm), cp.float32); bandlim_in[(nn-n)//2:(nn+n)//2, (mm-m)//2:(mm+m)//2] = 1.0
 bandlim_ou = 1.0 - bandlim_in
 sr_r0, sr_r1 = (nn-n)//2, (nn+n)//2; sr_c0, sr_c1 = (mm-m)//2, (mm+m)//2
@@ -37,12 +49,12 @@ ox, oy = cp.meshgrid(cp.linspace(-dh*mm/2, dh*mm/2, mm), cp.linspace(-dh*nn/2, d
 incident = cp.exp(-((ox**2)+(oy**2))/w) * bandlim_spe
 _ii = cp.arange(n).reshape(n,1); _jj = cp.arange(m).reshape(1,m)
 _denom = 2*cp.cos(2*cp.pi*_ii/n) + 2*cp.cos(2*cp.pi*_jj/m) - 4; _denom[0,0] = 1.0
-p = os.path.join(ALT_PROJ_DIR, input_tiff)
+p = input_tiff if os.path.isabs(input_tiff) else os.path.join(TARGETS_DIR, input_tiff)
 F1 = np.array(Image.open(p)); F1 = F1[...,0] if F1.ndim==3 else F1
 F1 = cv2.resize(F1.astype(np.float32), (m,n), interpolation=cv2.INTER_AREA)
 F1 = np.maximum(F1, target_floor_rel*(np.max(F1)+1e-12))
 E = float(np.sum(F1)); El = 0.5*E
-F = np.pad(np.abs(np.sqrt(F1)), ((n//4,n//4),(m//4,m//4)), mode="constant")
+F = np.pad(np.abs(np.sqrt(F1)), ((pad_each,pad_each),(pad_each,pad_each)), mode="constant")
 F_gpu = cp.asarray(F); E_gpu = cp.asarray(E); El_gpu = cp.asarray(El); F1_gpu = cp.asarray(F1)
 
 def irrotational_phase(pha):
@@ -113,6 +125,5 @@ for name, r in runs.items():
     plt.plot(r["NUM"][1:], label=name)
 plt.xlabel("Iteration"); plt.ylabel("Vortex count (SR)"); plt.yscale("log"); plt.title(f"Init vs vortices — {os.path.splitext(input_tiff)[0]}")
 plt.legend(fontsize=8)
-fig.savefig(os.path.join(output_dir, "vortex.png"), dpi=150, bbox_inches="tight"); plt.show()
-print(f"Saved to {output_dir}")
+plt.show()
 # %%

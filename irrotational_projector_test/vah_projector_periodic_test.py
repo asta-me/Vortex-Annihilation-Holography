@@ -4,7 +4,7 @@ Periodic / stagnation-triggered irrotational PROJECTOR vs the paper's periodic V
 
 Idea
 ----
-Instead of applying the irrotational projector at EVERY iteration (vah_ph_projector_test.py),
+Instead of applying the irrotational projector at EVERY iteration (vah_projector_fft_test.py),
 apply it only NOW AND THEN -- exactly where the paper applies its arctan2 vortex annihilation:
     - "periodic"    : every `trigger_x` iterations, or
     - "stagnation"  : when the RMSE curve flattens (relative-slope criterion).
@@ -38,7 +38,6 @@ Env: vortex (conda), GPU (CuPy). PIL + cv2 (no skimage).
 import time
 import os
 import sys
-import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import cupy as cp
@@ -56,11 +55,23 @@ dh = 0.00374
 loop = 300
 seed = 42
 
-input_tiff = "marmo.tif"                  # <-- CHANGE TARGET HERE
+# Target: uncomment ONE line (files live in ./targets/, or give an absolute path).
+input_tiff = "marmo.tif"
+# input_tiff = "object_grayscale_from_mat.tif"
+# input_tiff = "Lenna.tif"
+# input_tiff = "Baboon.tif"
+# input_tiff = "valentini.tif"
 target_floor_rel = 5e-3
 trigger_x = 50                            # period for the "periodic" mode
 alpha_every = 0.5                         # blend for the every-iteration reference
 alpha_trigger = 1.0                       # full projection applied at a trigger
+
+# Geometry (fix the hologram size and the SR fraction; the rest is derived)
+HOLOGRAM_SIZE = 384           # SLM aperture side [px] (= half the work grid; 2x oversampling)
+WORK_SIZE = 2 * HOLOGRAM_SIZE  # computational grid side [px]
+SR_FRACTION = 2 / 3           # signal-region side as a fraction of WORK_SIZE (image size)
+SR_SIZE = int(round(SR_FRACTION * WORK_SIZE)); SR_SIZE -= SR_SIZE % 2
+assert 0 < SR_SIZE <= WORK_SIZE, "SR_FRACTION out of range: signal region must fit the grid"
 
 # Stagnation criterion (relative slope of the RMSE curve)
 stag_window = 15
@@ -68,12 +79,13 @@ stag_tol_rel = 1e-3
 stag_warmup = 30
 stag_cooldown = 20                        # min iterations between two stagnation triggers
 
-#%% ---------- Fixed grid ----------
-n = m = 512
-nn = n + 2 * (n // 4)
-mm = m + 2 * (m // 4)
+#%% ---------- Grid ----------
+n = m = SR_SIZE
+nn = mm = WORK_SIZE
+pad_each = (WORK_SIZE - SR_SIZE) // 2
+ap0 = (WORK_SIZE - HOLOGRAM_SIZE) // 2
 bandlim_spe = cp.zeros((nn, mm), dtype=cp.float32)
-bandlim_spe[nn // 4:3 * nn // 4, mm // 4:3 * mm // 4] = 1.0
+bandlim_spe[ap0:ap0 + HOLOGRAM_SIZE, ap0:ap0 + HOLOGRAM_SIZE] = 1.0
 bandlim_in = cp.zeros((nn, mm), dtype=cp.float32)
 bandlim_in[(nn - n) // 2:(nn + n) // 2, (mm - m) // 2:(mm + m) // 2] = 1.0
 bandlim_ou = 1.0 - bandlim_in
@@ -89,11 +101,10 @@ _denom = 2 * cp.cos(2 * cp.pi * _ii / n) + 2 * cp.cos(2 * cp.pi * _jj / m) - 4
 _denom[0, 0] = 1.0
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-output_dir = os.path.join(script_dir, "output_test_periodic")
-os.makedirs(output_dir, exist_ok=True)
+TARGETS_DIR = os.path.join(script_dir, "targets")
 
 #%% ---------- Target ----------
-input_tiff_path = os.path.join(ALT_PROJ_DIR, input_tiff)
+input_tiff_path = input_tiff if os.path.isabs(input_tiff) else os.path.join(TARGETS_DIR, input_tiff)
 if not os.path.isfile(input_tiff_path):
     raise FileNotFoundError(f"TIFF file not found: {input_tiff_path}")
 _F1 = np.array(Image.open(input_tiff_path))
@@ -102,7 +113,7 @@ if _F1.ndim == 3:
 _F1 = cv2.resize(_F1.astype(np.float32), (m, n), interpolation=cv2.INTER_AREA)
 F1 = np.maximum(_F1, target_floor_rel * (np.max(_F1) + 1e-12))
 E = float(np.sum(F1)); El = 0.5 * E
-F = np.pad(np.abs(np.sqrt(F1)), ((n // 4, n // 4), (m // 4, m // 4)), mode="constant")
+F = np.pad(np.abs(np.sqrt(F1)), ((pad_each, pad_each), (pad_each, pad_each)), mode="constant")
 F_gpu = cp.asarray(F); E_gpu = cp.asarray(E); El_gpu = cp.asarray(El); F1_gpu = cp.asarray(F1)
 target_name = os.path.splitext(input_tiff)[0]
 _dev = cp.cuda.Device()
@@ -231,29 +242,39 @@ for name, r in runs.items():
           f"events={r['n_events']:3d}  t_total={r['total_time']:6.2f}s  "
           f"t/event={r['per_event']*1e3:8.2f}ms", flush=True)
 
-#%% ---------- Plots ----------
+#%% ---------- Results table (simple markdown, regenerated each run) ----------
+tbl = [f"# Periodic vs every projector — {target_name}",
+       f"geometry {HOLOGRAM_SIZE}/{WORK_SIZE}/{SR_SIZE}, loop={loop}, x={trigger_x}",
+       "", "| method | RMSE | vortices | events | t_total [s] | t/event [ms] |",
+       "|---|---|---|---|---|---|"]
+for name, r in runs.items():
+    tbl.append(f"| {name} | {r['RMSE'][-1]:.4f} | {r['NUM'][-1]} | {r['n_events']} | "
+               f"{r['total_time']:.2f} | {r['per_event']*1e3:.2f} |")
+table_md = "\n".join(tbl) + "\n"
+table_path = os.path.join(script_dir, f"results_periodic_{target_name}.md")
+with open(table_path, "w", encoding="utf-8") as fh:
+    fh.write(table_md)
+print(f"\nResults table -> {table_path}")
+
+#%% ---------- Plots (all figures built, then a single plt.show() at the end) ----------
 # 1) RMSE vs iteration
-fig = plt.figure()
+fig1 = plt.figure()
 for name in ("off", "proj_every", "proj_periodic", "paper_periodic"):
     plt.plot(runs[name]["RMSE"][1:], label=name)
 plt.xlabel("Iteration"); plt.ylabel("RMSE (SR)")
 plt.title(f"RMSE vs iteration — {target_name} (period x={trigger_x})")
 plt.legend(fontsize=8)
-fig.savefig(os.path.join(output_dir, f"{target_name}_rmse.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
 # 2) Vortex count vs iteration
-fig = plt.figure()
+fig2 = plt.figure()
 for name in ("off", "proj_every", "proj_periodic", "paper_periodic"):
     plt.plot(runs[name]["NUM"][1:], label=name)
 plt.xlabel("Iteration"); plt.ylabel("Vortex count (SR)")
 plt.title(f"Vortex count vs iteration — {target_name} (period x={trigger_x})")
 plt.legend(fontsize=8)
-fig.savefig(os.path.join(output_dir, f"{target_name}_vortex.png"), dpi=150, bbox_inches="tight")
-plt.show()
 
 # 3) Time per annihilation event: projector vs paper (the key comparison)
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
 names_t = ["proj_periodic", "paper_periodic", "proj_stagnation", "paper_stagnation", "proj_every"]
 ax1.bar(range(len(names_t)), [runs[nm]["per_event"] * 1e3 for nm in names_t], color="C0")
 ax1.set_xticks(range(len(names_t))); ax1.set_xticklabels(names_t, rotation=45, ha="right", fontsize=7)
@@ -262,23 +283,12 @@ ax2.bar(range(len(names_t)), [runs[nm]["total_time"] for nm in names_t], color="
 ax2.set_xticks(range(len(names_t))); ax2.set_xticklabels(names_t, rotation=45, ha="right", fontsize=7)
 ax2.set_ylabel("Total run time [s]"); ax2.set_title("Total wall-clock")
 plt.tight_layout()
-fig.savefig(os.path.join(output_dir, f"{target_name}_timing.png"), dpi=150, bbox_inches="tight")
-plt.show()
-
-#%% ---------- CSV ----------
-csv_path = os.path.join(output_dir, "periodic_summary.csv")
-with open(csv_path, "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["image", "method", "final_rmse", "roughness", "final_vortices",
-                     "n_events", "total_time_s", "time_per_event_ms"])
-    for name, r in runs.items():
-        writer.writerow([target_name, name, r["RMSE"][-1], rmse_roughness(r["RMSE"], loop // 2),
-                         int(r["NUM"][-1]), r["n_events"], r["total_time"], r["per_event"] * 1e3])
 
 # speedup print
 if runs["paper_periodic"]["per_event"] > 0:
     sp = runs["paper_periodic"]["per_event"] / max(runs["proj_periodic"]["per_event"], 1e-12)
-    print(f"\nPer-event speedup (paper / projector, periodic): {sp:.1f}x")
-print(f"Figures + summary saved to: {output_dir}")
+    print(f"Per-event speedup (paper / projector, periodic): {sp:.1f}x")
+
+plt.show()
 
 # %%
